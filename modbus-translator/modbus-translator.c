@@ -17,6 +17,7 @@
 
 bool terminate;
 int serial_port_fd;
+bool printDebug = false;
 
 void sighandler(int s) {
   UNUSED_PARAM(s);
@@ -94,13 +95,31 @@ int main(int argc, char *argv[]) {
   signal(SIGINT, sighandler);
   signal(SIGQUIT, sighandler);
 
-  if (argc < 3) {
-    fprintf(stderr, "Usage: server-tcp [address] [port]\n");
-    return 1;
+  int opt;
+  char ipaddress[15];
+  char port[5] = "502";
+  while ((opt = getopt(argc, argv, "vp:")) != -1) {
+    switch (opt) {
+    case 'v':
+      printDebug = true;
+      break;
+    case 'p':
+      strncpy(port, optarg, sizeof(port) / sizeof(port[0]));
+      break;
+    default:
+      fprintf(stderr, "Usage: %s [-v] [-p Port] [ipaddress]\n", argv[0]);
+      exit(EXIT_FAILURE);
+    }
   }
 
+  if (optind == argc) {
+    fprintf(stderr, "Usage: %s [-v] [-p Port] <ipaddress>\n", argv[0]);
+    exit(EXIT_FAILURE);
+  }
+  strncpy(ipaddress, argv[optind], sizeof(ipaddress) / sizeof(ipaddress[0]));
+
   // Set up the TCP server
-  int ret = create_tcp_server(argv[1], argv[2]);
+  int ret = create_tcp_server(ipaddress, port);
   if (ret != 0) {
     fprintf(stderr, "Error creating TCP server - %s\n", strerror(ret));
     return 1;
@@ -133,79 +152,71 @@ int main(int argc, char *argv[]) {
   return 0;
 }
 
+void printBinaryData(uint8_t *buf, int length) {
+  for (int i = 0; i < length; i++) {
+    if (i > 0)
+      printf(":");
+    printf("%02X", buf[i]);
+  }
+  printf("\n");
+}
+
 void handle_modbus(void *conn) {
 
-	//Get data from TCP
+  // Buffers
   uint8_t tcp_in_buf[60];
-  int total = read_fd_linux(tcp_in_buf, 60, 10, conn);
-
-  printf("Data recieved (starting from i=6): ");
-  for (int i = 0; i < total; i++) {
-    if (i > 0 && i != 6)
-      printf(":");
-    if (i == 6)
-      printf(" | ");
-    printf("%02X", tcp_in_buf[i]);
-  }
-  printf("\n");
-
-  // Send data via serial
   uint8_t serial_out_buf[60];
-  int serial_total = total - 6;
-  memcpy(serial_out_buf, &tcp_in_buf[6], serial_total);
-  uint16_t CRC = nmbs_crc_calc(serial_out_buf, serial_total);
-  serial_out_buf[serial_total] = (uint8_t)(CRC >> 8);
-  serial_out_buf[serial_total + 1] = (uint8_t)(CRC & 0xFF);
-  serial_total += 2;
-
-  write(serial_port_fd, serial_out_buf,
-        serial_total * sizeof(serial_out_buf[0]));
-
-  printf("Data sent via serial: ");
-  for (int i = 0; i < serial_total; i++) {
-    if (i > 0)
-      printf(":");
-    printf("%02X", serial_out_buf[i]);
-  }
-  printf("\n");
-
-//Get data back from serial
   uint8_t serial_in_buf[256];
-  int serial_in_total =
-      read(serial_port_fd, serial_in_buf, sizeof(serial_in_buf));
+  uint8_t tcp_out_buf[256];
 
-  if (serial_in_total < 0) {
-    printf("Error reading back serial response: %s\n", strerror(errno));
+  // Get data from TCP
+  int tcp_in_total = read_fd_linux(tcp_in_buf, 60, 10, conn);
+  if (tcp_in_total <= 0) {
+    printf("No data received from TCP\n\n");
     return;
   }
-
-  printf("Data received from serial: ");
-  for (int i = 0; i < serial_in_total; i++) {
-    if (i > 0)
-      printf(":");
-    printf("%02X", serial_in_buf[i]);
+  if (printDebug) {
+    printf("Data recieved from TCP: \t");
+    printBinaryData(tcp_in_buf, tcp_in_total);
   }
-  printf("\n");
 
-  //Send data back via TCP
-  uint8_t tcp_out_buf[256];
-  int serial_in_total_wo_CRC = serial_in_total-2;
-  memcpy(&tcp_out_buf[0],&tcp_in_buf[0],4); //Transaction Identifier, Protocol Identifier
-  tcp_out_buf[4] = serial_in_total_wo_CRC>>8;
-  tcp_out_buf[5] = serial_in_total_wo_CRC&0xFF;
-  memcpy(&tcp_out_buf[6],&serial_in_buf[0],serial_in_total_wo_CRC);
-  int tcp_out_total = 6+serial_in_total_wo_CRC;
+  // Send data via serial
+  int serial_out_total = tcp_in_total - 6;
+  memcpy(serial_out_buf, &tcp_in_buf[6], serial_out_total);
+  uint16_t CRC = nmbs_crc_calc(serial_out_buf, serial_out_total);
+  serial_out_buf[serial_out_total] = (uint8_t)(CRC >> 8);
+  serial_out_buf[serial_out_total + 1] = (uint8_t)(CRC & 0xFF);
+  serial_out_total += 2;
+  write(serial_port_fd, serial_out_buf,
+        serial_out_total * sizeof(serial_out_buf[0]));
+  if (printDebug) {
+    printf("Data sent via serial: \t\t");
+    printBinaryData(serial_out_buf, serial_out_total);
+  }
+  // Get data back from serial
+  int serial_in_total =
+      read(serial_port_fd, serial_in_buf, sizeof(serial_in_buf));
+  if (serial_in_total <= 0) {
+    printf("Error reading back serial response: %s\n\n", strerror(errno));
+    return;
+  }
+  if (printDebug) {
+    printf("Data received from serial: \t");
+    printBinaryData(serial_in_buf, serial_in_total);
+  }
 
+  // Send data back via TCP
+  int serial_in_total_wo_CRC = serial_in_total - 2;
+  memcpy(&tcp_out_buf[0], &tcp_in_buf[0],
+         4); // Transaction Identifier, Protocol Identifier
+  tcp_out_buf[4] = serial_in_total_wo_CRC >> 8;
+  tcp_out_buf[5] = serial_in_total_wo_CRC & 0xFF;
+  memcpy(&tcp_out_buf[6], &serial_in_buf[0], serial_in_total_wo_CRC);
+  int tcp_out_total = 6 + serial_in_total_wo_CRC;
   write_fd_linux(tcp_out_buf, tcp_out_total, 10, conn);
-  
-  printf("Data sent back via TCP: ");
-  for (int i = 0; i < tcp_out_total; i++) {
-    if (i > 0 && i != 6)
-      printf(":");
-    if (i == 6)
-      printf(" | ");
-    printf("%02X", tcp_out_buf[i]);
+  if (printDebug) {
+    printf("Data sent back via TCP: \t");
+    printBinaryData(tcp_out_buf, tcp_out_total);
+    printf("\n");
   }
-  printf("\n");
-  
 }
