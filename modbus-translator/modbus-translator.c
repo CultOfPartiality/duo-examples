@@ -179,6 +179,7 @@ void handle_modbus(void *conn) {
     printf("Data recieved from TCP: \t");
     printBinaryData(tcp_in_buf, tcp_in_total);
   }
+  printf("Host x.x.x.x requesting FC:%d, from unit: %d\n",tcp_in_buf[7],tcp_in_buf[6]);
 
   // Send data via serial
   int serial_out_total = tcp_in_total - 6;
