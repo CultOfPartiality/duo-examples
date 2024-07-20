@@ -13,7 +13,7 @@
 #include <unistd.h>
 
 #include "nanomodbus.h"
-#include "platform.h"
+#include "platform.h" 
 
 bool terminate;
 int serial_port_fd;
@@ -87,7 +87,7 @@ int initialise_serial(const char tty_path[], int baud, int read_timeout_ds) {
   return serial_port_fd;
 }
 
-void handle_modbus(void *);
+void handle_modbus(ClientConnectionDetails *);
 
 int main(int argc, char *argv[]) {
   signal(SIGTERM, sighandler);
@@ -135,12 +135,8 @@ int main(int argc, char *argv[]) {
 
   // Our server supports requests from more than one client
   while (!terminate) {
-    // Our server_poll() function will return the next client TCP connection to
-    // read from
-    void *conn = server_poll();
+    ClientConnectionDetails *conn = server_poll_detail();
     if (conn) {
-      // Set the next connection handler used by the read/write platform
-      // functions
       handle_modbus(conn);
     }
   }
@@ -161,7 +157,7 @@ void printBinaryData(uint8_t *buf, int length) {
   printf("\n");
 }
 
-void handle_modbus(void *conn) {
+void handle_modbus(ClientConnectionDetails *conn) {
 
   // Buffers
   uint8_t tcp_in_buf[60];
@@ -170,7 +166,7 @@ void handle_modbus(void *conn) {
   uint8_t tcp_out_buf[256];
 
   // Get data from TCP
-  int tcp_in_total = read_fd_linux(tcp_in_buf, 60, 10, conn);
+  int tcp_in_total = read_fd_linux(tcp_in_buf, 60, 10, &(conn->fd));
   if (tcp_in_total <= 0) {
     printf("No data received from TCP\n\n");
     return;
@@ -179,7 +175,7 @@ void handle_modbus(void *conn) {
     printf("Data recieved from TCP: \t");
     printBinaryData(tcp_in_buf, tcp_in_total);
   }
-  printf("Host x.x.x.x requesting FC:%d, from unit: %d\n",tcp_in_buf[7],tcp_in_buf[6]);
+  printf("Host %s requesting FC:%d, from unit: %d\n",inet_ntoa(conn->addr.sin_addr),tcp_in_buf[7],tcp_in_buf[6]);
 
   // Send data via serial
   int serial_out_total = tcp_in_total - 6;
@@ -214,10 +210,11 @@ void handle_modbus(void *conn) {
   tcp_out_buf[5] = serial_in_total_wo_CRC & 0xFF;
   memcpy(&tcp_out_buf[6], &serial_in_buf[0], serial_in_total_wo_CRC);
   int tcp_out_total = 6 + serial_in_total_wo_CRC;
-  write_fd_linux(tcp_out_buf, tcp_out_total, 10, conn);
+  write_fd_linux(tcp_out_buf, tcp_out_total, 10, &(conn->fd));
   if (printDebug) {
     printf("Data sent back via TCP: \t");
     printBinaryData(tcp_out_buf, tcp_out_total);
     printf("\n");
   }
+  printf("Sent response back to %s, FC:%d\n",inet_ntoa(conn->addr.sin_addr),tcp_out_buf[7]);
 }
